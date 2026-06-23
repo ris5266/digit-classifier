@@ -17,9 +17,6 @@ def get_dataloaders(batch_size=64, data_dir="./data"):
     train_dataset = datasets.MNIST(root=data_dir, train=True, download=True, transform=transform)
     test_dataset = datasets.MNIST(root=data_dir, train=False, download=True, transform=transform)
 
-    print(f"Loading Training samples : {len(train_dataset):,}")
-    print(f"Loading Test samples     : {len(test_dataset):,}")
-
     # create data loaders for train and test datasets
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
