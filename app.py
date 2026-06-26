@@ -1,6 +1,5 @@
 import os
 import sys
-import threading
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -21,10 +20,6 @@ from model import DigitClassifier
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "best_model.pth")
 
-_training_log = []
-_training_done = False
-_training_lock = threading.Lock()
-
 
 def get_transform():
     return transforms.Compose([
@@ -33,13 +28,22 @@ def get_transform():
     ])
 
 
+def dataset_ready():
+    # true if the mnist files are already on disk
+    try:
+        datasets.MNIST(DATA_DIR, train=True, download=False)
+        datasets.MNIST(DATA_DIR, train=False, download=False)
+        return True
+    except Exception:
+        return False
+
+
 def download_dataset():
     try:
-        transform = get_transform()
-        train_ds = datasets.MNIST(DATA_DIR, train=True, download=True, transform=transform)
-        test_ds = datasets.MNIST(DATA_DIR, train=False, download=True, transform=transform)
+        train_ds = datasets.MNIST(DATA_DIR, train=True, download=True)
+        test_ds = datasets.MNIST(DATA_DIR, train=False, download=True)
         return (
-            f"Dataset successfully downloaded!\n\n"
+            f"Dataset ready!\n\n"
             f"Training samples : {len(train_ds):,}\n"
             f"Test samples : {len(test_ds):,}\n"
         )
@@ -47,21 +51,17 @@ def download_dataset():
         return f"Download failed: {e}"
 
 
-def _run_training(num_epochs, batch_size, lr, weight_decay):
-    global _training_done
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    transform = get_transform()
-
-    try:
-        train_ds = datasets.MNIST(DATA_DIR, train=True, download=False, transform=transform)
-        test_ds = datasets.MNIST(DATA_DIR, train=False, download=False, transform=transform)
-    except Exception:
-        with _training_lock:
-            _training_log.append("Please download the dataset first.")
-        _training_done = True
+# this is a generator so the log streams into the ui live, epoch by epoch
+def train_model(num_epochs, batch_size, lr, weight_decay):
+    if not dataset_ready():
+        yield "Please download the dataset first (step 1)."
         return
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    transform = get_transform()
+
+    train_ds = datasets.MNIST(DATA_DIR, train=True, download=False, transform=transform)
+    test_ds = datasets.MNIST(DATA_DIR, train=False, download=False, transform=transform)
     train_loader = DataLoader(train_ds, batch_size=int(batch_size), shuffle=True, num_workers=0)
     test_loader = DataLoader(test_ds, batch_size=256, shuffle=False, num_workers=0)
 
@@ -70,9 +70,8 @@ def _run_training(num_epochs, batch_size, lr, weight_decay):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     best_acc = 0.0
-
-    with _training_lock:
-        _training_log.append(f"Device : {device}\n")
+    log = [f"Device : {device}", "Training started...\n"]
+    yield "\n".join(log)
 
     for epoch in range(1, int(num_epochs) + 1):
         # train for one epoch
@@ -105,46 +104,28 @@ def _run_training(num_epochs, batch_size, lr, weight_decay):
 
         line = f"Epoch {epoch:2d}/{int(num_epochs)}  loss {train_loss:.4f}  train {train_acc:.1f}%  val {val_acc:.1f}%"
 
-        # save the model when it gets better
+        # save the model whenever it gets better
         if val_acc > best_acc:
             best_acc = val_acc
             torch.save(model.state_dict(), MODEL_PATH)
             line += "  saved"
 
-        with _training_lock:
-            _training_log.append(line)
+        log.append(line)
+        yield "\n".join(log)
 
-    with _training_lock:
-        _training_log.append(f"\nDone! Best val accuracy: {best_acc:.2f}%")
-    _training_done = True
-
-
-def start_training(num_epochs, batch_size, lr, weight_decay):
-    global _training_log, _training_done
-    _training_log = ["Starting training...\n"]
-    _training_done = False
-    t = threading.Thread(target=_run_training, args=(num_epochs, batch_size, lr, weight_decay), daemon=True)
-    t.start()
-    return "Training started. Refresh to update."
-
-
-def poll_log():
-    with _training_lock:
-        return "\n".join(_training_log)
+    log.append(f"\nDone!")
+    yield "\n".join(log)
 
 
 def evaluate_model():
     if not os.path.exists(MODEL_PATH):
-        return "No trained model found. Train first.", None
+        return "No trained model found. Train it first (step 2).", None
+    if not dataset_ready():
+        return "Dataset not found. Download it first (step 1).", None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     transform = get_transform()
-
-    try:
-        test_ds = datasets.MNIST(DATA_DIR, train=False, download=False, transform=transform)
-    except Exception:
-        return "Dataset not found. Download it first.", None
-
+    test_ds = datasets.MNIST(DATA_DIR, train=False, download=False, transform=transform)
     test_loader = DataLoader(test_ds, batch_size=256, shuffle=False, num_workers=0)
 
     model = DigitClassifier()
@@ -164,7 +145,7 @@ def evaluate_model():
     all_labels = np.array(all_labels)
     overall = (all_preds == all_labels).mean() * 100
 
-    # work out the accuracy for each digit separately
+    # accuracy for each digit separately
     lines = [f"Overall accuracy: {overall:.2f}%\n", "Per-digit accuracy:"]
     for d in range(10):
         mask = all_labels == d
@@ -197,15 +178,16 @@ def evaluate_model():
 
 def predict_drawing(drawing):
     if not os.path.exists(MODEL_PATH):
-        return "No trained model found. Train first.", None
+        return "No trained model found. Train it first (step 2).", None
 
     if drawing is None:
-        return "Draw a digit on the canvas above.", None
+        return "Draw a digit on the canvas.", None
 
     img = drawing.get("composite") if isinstance(drawing, dict) else drawing
     if img is None:
-        return "Draw a digit on the canvas above.", None
+        return "Draw a digit on the canvas.", None
 
+    # canvas is black on white, so invert it to match mnist
     img = img.convert("L")
     img = ImageOps.invert(img)
     img = img.resize((28, 28), Image.LANCZOS)
@@ -225,6 +207,7 @@ def predict_drawing(drawing):
     confidence = probs[pred] * 100
     label = f"Predicted: **{pred}**  ({confidence:.1f}% confident)"
 
+    # bar chart of the confidence per digit
     fig, ax = plt.subplots(figsize=(5, 3))
     colors = []
     for i in range(10):
@@ -243,65 +226,51 @@ def predict_drawing(drawing):
     return label, fig
 
 
-# build gradio interface
+# build the gradio interface, everything on one page top to bottom
 with gr.Blocks(title="Digit Classifier", theme=gr.themes.Soft()) as demo:
 
-    with gr.Tab("1· Download dataset"):
-        gr.Markdown("Downloads the required MNIST dataset.")
-        dl_btn = gr.Button("Download MNIST", variant="primary")
-        dl_status = gr.Textbox(label="Status", lines=5, interactive=False)
-        dl_btn.click(fn=download_dataset, outputs=dl_status)
+    # step 1 - download
+    gr.Markdown("## Step 1: Download the dataset")
+    dl_btn = gr.Button("Download MNIST", variant="primary")
+    dl_status = gr.Textbox(label="Status", lines=4, interactive=False)
+    dl_btn.click(fn=download_dataset, outputs=dl_status)
 
-    with gr.Tab("2· Train model"):
-        with gr.Row():
-            epochs = gr.Slider(1, 20, value=10, step=1, label="Epochs")
-            batch_size = gr.Slider(32, 256, value=64, step=32, label="Batch size")
-        with gr.Row():
-            lr = gr.Number(value=1e-3, label="Learning rate (Adam)")
-            weight_decay = gr.Number(value=1e-4, label="Weight decay (L2)")
+    # step 2 - train
+    gr.Markdown("## Step 2: Train the model")
+    with gr.Row():
+        epochs = gr.Slider(1, 20, value=10, step=1, label="Epochs")
+        batch_size = gr.Slider(32, 256, value=64, step=32, label="Batch size")
+    with gr.Row():
+        lr = gr.Number(value=1e-3, label="Learning rate (Adam)")
+        weight_decay = gr.Number(value=1e-4, label="Weight decay (L2)")
+    train_btn = gr.Button("Start training", variant="primary")
+    log_box = gr.Textbox(label="Training log", lines=14, interactive=False)
+    train_btn.click(
+        fn=train_model,
+        inputs=[epochs, batch_size, lr, weight_decay],
+        outputs=log_box
+    )
 
-        train_btn = gr.Button("Start training", variant="primary")
-        train_msg = gr.Textbox(label="Status", lines=2, interactive=False)
-        log_box = gr.Textbox(label="Training log", lines=16, interactive=False)
+    # step 3 - evaluate (two ways)
+    gr.Markdown("## Step 3: Evaluate the model")
 
-        refresh_btn = gr.Button("Refresh")
-
-        train_btn.click(
-            fn=start_training,
-            inputs=[epochs, batch_size, lr, weight_decay],
-            outputs=train_msg
-        )
-        refresh_btn.click(fn=poll_log, outputs=log_box)
-
-    with gr.Tab("3· Evaluate on test set"):
-        gr.Markdown(
-            "Runs the trained model on the 10,000 test images it has never seen. "
-            "Shows accuracy per digit and a confusion matrix."
-        )
-        eval_btn = gr.Button("Evaluate", variant="primary")
+    gr.Markdown("### Run it on a test set")
+    gr.Markdown("Checks the model on the 10,000 test images it never saw during training.")
+    eval_btn = gr.Button("Evaluate on test set", variant="primary")
+    with gr.Row():
         eval_report = gr.Textbox(label="Accuracy report", lines=14, interactive=False)
         conf_matrix = gr.Plot(label="Confusion matrix")
-        eval_btn.click(fn=evaluate_model, outputs=[eval_report, conf_matrix])
+    eval_btn.click(fn=evaluate_model, outputs=[eval_report, conf_matrix])
 
-    with gr.Tab("4· Draw a digit"):
-        gr.Markdown(
-            "Draw any digit (0–9) on the white canvas below. "
-            "The model predicts it instantly when you release the mouse."
-        )
-        with gr.Row():
-            with gr.Column(scale=1):
-                canvas = gr.Sketchpad(
-                    label="Draw here",
-                    type="pil",
-                    canvas_size=(280, 280),
-                )
-                clear_btn = gr.Button("Clear canvas")
-            with gr.Column(scale=1):
-                pred_label = gr.Markdown("Draw a digit to see the prediction.")
-                pred_chart = gr.Plot(label="Confidence per digit")
-
-        canvas.change(fn=predict_drawing, inputs=canvas, outputs=[pred_label, pred_chart])
-        clear_btn.click(lambda: None, outputs=canvas)
+    gr.Markdown("### Draw your own digit")
+    gr.Markdown("Draw any digit (0–9) on the canvas. It predicts when you release the mouse.")
+    with gr.Row():
+        with gr.Column(scale=1):
+            canvas = gr.Sketchpad(label="Draw here", type="pil", canvas_size=(280, 280))
+        with gr.Column(scale=1):
+            pred_label = gr.Markdown("Draw a digit to see the prediction.")
+            pred_chart = gr.Plot(label="Confidence per digit")
+    canvas.change(fn=predict_drawing, inputs=canvas, outputs=[pred_label, pred_chart])
 
 
 if __name__ == "__main__":
