@@ -9,9 +9,9 @@ from model import DigitClassifier
 
 
 def preprocess_image(image_path):
+    img = Image.open(image_path).convert("L")
 
-    img = Image.open(image_path).convert("L")   # grayscale
-
+    # mnist digits are white on black, so invert if not
     pixels = list(img.getdata())
     avg_brightness = sum(pixels) / len(pixels)
     if avg_brightness > 127:
@@ -28,7 +28,6 @@ def preprocess_image(image_path):
 
 
 def predict(image_path, model_path="best_model.pth", show_plot=True):
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = DigitClassifier()
@@ -38,6 +37,7 @@ def predict(image_path, model_path="best_model.pth", show_plot=True):
 
     image_tensor = preprocess_image(image_path).to(device)
 
+    # softmax for probabilities instead of raw scores
     with torch.no_grad():
         logits = model(image_tensor)
         probs = F.softmax(logits, dim=1).squeeze()
@@ -45,26 +45,24 @@ def predict(image_path, model_path="best_model.pth", show_plot=True):
     predicted_digit = probs.argmax().item()
     confidence = probs[predicted_digit].item() * 100
 
-    print(f"\nPredicted digit : {predicted_digit}")
-    print(f"Confidence      : {confidence:.1f}%\n")
-    print("All probabilities:")
-    for digit, prob in enumerate(probs.tolist()):
-        bar = "#" * int(prob * 40)
-        marker = " <-- predicted" if digit == predicted_digit else ""
-        print(f"  {digit}: {prob*100:5.1f}%  {bar}{marker}")
+    print(f"Predicted digit: {predicted_digit}  ({confidence:.1f}%)")
 
     if show_plot:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9, 4))
 
         raw_img = Image.open(image_path).convert("L").resize((28, 28))
         ax1.imshow(raw_img, cmap="gray")
-        ax1.set_title(f"Input image")
+        ax1.set_title("Input image")
         ax1.axis("off")
 
-        colors = ["#7F77DD" if i == predicted_digit else "#D3D1C7"
-                  for i in range(10)]
-        ax2.barh(range(10), [p * 100 for p in probs.tolist()],
-                 color=colors, edgecolor="none")
+        colors = []
+        for i in range(10):
+            if i == predicted_digit:
+                colors.append("#7F77DD")
+            else:
+                colors.append("#D3D1C7")
+
+        ax2.barh(range(10), [p * 100 for p in probs.tolist()], color=colors, edgecolor="none")
         ax2.set_yticks(range(10))
         ax2.set_xlabel("Confidence (%)")
         ax2.set_title(f"Prediction: {predicted_digit}  ({confidence:.1f}%)")
@@ -73,7 +71,6 @@ def predict(image_path, model_path="best_model.pth", show_plot=True):
 
         plt.tight_layout()
         plt.savefig("prediction_result.png", dpi=150)
-        print("\nPlot saved to prediction_result.png")
         plt.show()
 
     return predicted_digit, confidence

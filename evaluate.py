@@ -11,6 +11,7 @@ def evaluate(model_path="best_model.pth"):
 
     _, test_loader = get_dataloaders(batch_size=256)
 
+    # load weights
     model = DigitClassifier()
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
@@ -19,12 +20,13 @@ def evaluate(model_path="best_model.pth"):
     all_preds = []
     all_labels = []
 
+    # run test set
     with torch.no_grad():
         for images, labels in test_loader:
             images = images.to(device)
             outputs = model(images)
-            predictions = outputs.argmax(dim=1).cpu()
-            all_preds.extend(predictions.tolist())
+            preds = outputs.argmax(dim=1).cpu()
+            all_preds.extend(preds.tolist())
             all_labels.extend(labels.tolist())
 
     all_preds = np.array(all_preds)
@@ -32,7 +34,9 @@ def evaluate(model_path="best_model.pth"):
 
     plot_confusion_matrix(all_labels, all_preds)
 
+
 def plot_confusion_matrix(labels, preds):
+    # count how often each digit got predicted
     matrix = np.zeros((10, 10), dtype=int)
     for true, pred in zip(labels, preds):
         matrix[true][pred] += 1
@@ -54,7 +58,6 @@ def plot_confusion_matrix(labels, preds):
 
     plt.tight_layout()
     plt.savefig("confusion_matrix.png", dpi=150)
-    print("\nConfusion matrix saved to confusion_matrix.png")
     plt.show()
 
 
