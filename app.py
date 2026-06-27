@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageFilter, ImageChops
 
 import gradio as gr
 
@@ -29,7 +29,6 @@ def get_transform():
 
 
 def dataset_ready():
-    # true if the mnist files are already on disk
     try:
         datasets.MNIST(DATA_DIR, train=True, download=False)
         datasets.MNIST(DATA_DIR, train=False, download=False)
@@ -51,7 +50,6 @@ def download_dataset():
         return f"Download failed: {e}"
 
 
-# this is a generator so the log streams into the ui live, epoch by epoch
 def train_model(num_epochs, batch_size, lr, weight_decay):
     if not dataset_ready():
         yield "Please download the dataset first (step 1)."
@@ -176,21 +174,63 @@ def evaluate_model():
     return report, fig
 
 
+# mnist digits are cropped, scaled to 20px and centered in a 28x28 box,
+# so we have to do the same to the drawing or the model gets confused
+def canvas_to_mnist(img):
+    img = img.convert("L")
+    img = ImageOps.invert(img)
+    arr = np.array(img)
+
+    # find the pixels that were actually drawn
+    coords = np.argwhere(arr > 30)
+    if coords.size == 0:
+        return None
+
+    # crop to the bounding box of the digit
+    (y0, x0), (y1, x1) = coords.min(0), coords.max(0)
+    img = img.crop((x0, y0, x1 + 1, y1 + 1))
+
+    # scale the longest side to 20px and keep the aspect ratio
+    w, h = img.size
+    if w > h:
+        new_w, new_h = 20, max(1, round(h * 20 / w))
+    else:
+        new_w, new_h = max(1, round(w * 20 / h)), 20
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    # thicken the strokes
+    img = img.filter(ImageFilter.MaxFilter(3))
+    img = img.filter(ImageFilter.GaussianBlur(0.5))
+
+    # paste it in middle of a 28x28 black canvas
+    out = Image.new("L", (28, 28), 0)
+    out.paste(img, ((28 - new_w) // 2, (28 - new_h) // 2))
+
+    # shift so the center of mass sits in the middle
+    arr = np.array(out, dtype=np.float32)
+    ys, xs = np.nonzero(arr)
+    if len(xs) > 0:
+        cx = (xs * arr[ys, xs]).sum() / arr[ys, xs].sum()
+        cy = (ys * arr[ys, xs]).sum() / arr[ys, xs].sum()
+        out = ImageChops.offset(out, int(round(14 - cx)), int(round(14 - cy)))
+
+    return out
+
+
 def predict_drawing(drawing):
     if not os.path.exists(MODEL_PATH):
         return "No trained model found. Train it first (step 2).", None
 
     if drawing is None:
-        return "Draw a digit on the canvas.", None
+        return "", None
 
     img = drawing.get("composite") if isinstance(drawing, dict) else drawing
     if img is None:
-        return "Draw a digit on the canvas.", None
+        return "D", None
 
-    # canvas is black on white, so invert it to match mnist
-    img = img.convert("L")
-    img = ImageOps.invert(img)
-    img = img.resize((28, 28), Image.LANCZOS)
+    img = canvas_to_mnist(img)
+    if img is None:
+        return "", None
 
     transform = get_transform()
     tensor = transform(img).unsqueeze(0)
@@ -226,16 +266,16 @@ def predict_drawing(drawing):
     return label, fig
 
 
-# build the gradio interface, everything on one page top to bottom
-with gr.Blocks(title="Digit Classifier", theme=gr.themes.Soft()) as demo:
+# build gradio ui
+with gr.Blocks(title="Digit Classifier") as demo:
 
-    # step 1 - download
+    # download
     gr.Markdown("## Step 1: Download the dataset")
     dl_btn = gr.Button("Download MNIST", variant="primary")
     dl_status = gr.Textbox(label="Status", lines=4, interactive=False)
     dl_btn.click(fn=download_dataset, outputs=dl_status)
 
-    # step 2 - train
+    # train
     gr.Markdown("## Step 2: Train the model")
     with gr.Row():
         epochs = gr.Slider(1, 20, value=10, step=1, label="Epochs")
@@ -251,7 +291,7 @@ with gr.Blocks(title="Digit Classifier", theme=gr.themes.Soft()) as demo:
         outputs=log_box
     )
 
-    # step 3 - evaluate (two ways)
+    # evaluate
     gr.Markdown("## Step 3: Evaluate the model")
 
     gr.Markdown("### Run it on a test set")
@@ -263,15 +303,23 @@ with gr.Blocks(title="Digit Classifier", theme=gr.themes.Soft()) as demo:
     eval_btn.click(fn=evaluate_model, outputs=[eval_report, conf_matrix])
 
     gr.Markdown("### Draw your own digit")
-    gr.Markdown("Draw any digit (0–9) on the canvas. It predicts when you release the mouse.")
+    gr.Markdown("Draw any digit (0–9) on the canvas for the model to predict.")
     with gr.Row():
         with gr.Column(scale=1):
-            canvas = gr.Sketchpad(label="Draw here", type="pil", canvas_size=(280, 280))
+            canvas = gr.Sketchpad(
+                label="Draw here",
+                type="pil",
+                canvas_size=(280, 280),
+                brush=gr.Brush(default_size=10, colors=["#000000"], default_color="#000000", color_mode="fixed"),
+                eraser=False,
+                transforms=(),
+                layers=False,
+            )
         with gr.Column(scale=1):
-            pred_label = gr.Markdown("Draw a digit to see the prediction.")
+            pred_label = gr.Markdown("")
             pred_chart = gr.Plot(label="Confidence per digit")
     canvas.change(fn=predict_drawing, inputs=canvas, outputs=[pred_label, pred_chart])
 
 
 if __name__ == "__main__":
-    demo.launch(share=False)
+    demo.launch(share=False, theme=gr.themes.Soft())
