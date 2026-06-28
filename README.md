@@ -34,6 +34,17 @@
 
 </div>
 
+### Confusion matrix
+
+<div align="center">
+
+  ![Confusion matrix on the MNIST test set](confusion_matrix.png)
+
+</div>
+
+Each row is the true digit, each column is the digit the model predicted and every cell counts how many of the 10,000 test images fell into that combination. The strong diagonal shows the model almost always predicts the correct digit.
+
+
 ## Install
 
 1. **Clone the repository**
@@ -60,3 +71,4 @@ The model is a fully connected neural network (784 → 256 → 128 → 10) train
 - Softmax output
 
 Drawn digits are normalized to match MNIST before prediction: the stroke is cropped to its bounding box, scaled to fit a 20px box, thickened, and centered by its center of mass inside a 28x28 frame.
+
