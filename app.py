@@ -1,5 +1,6 @@
 import os
 import sys
+import datetime
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -18,7 +19,15 @@ sys.path.insert(0, os.path.dirname(__file__))
 from model import DigitClassifier
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "best_model.pth")
+MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
+
+
+def list_models():
+    if not os.path.isdir(MODELS_DIR):
+        return []
+    files = [f for f in os.listdir(MODELS_DIR) if f.endswith(".pth")]
+    files.sort(key=lambda f: os.path.getmtime(os.path.join(MODELS_DIR, f)), reverse=True)
+    return files
 
 
 def get_transform():
@@ -52,7 +61,7 @@ def download_dataset():
 
 def train_model(num_epochs, batch_size, lr, weight_decay):
     if not dataset_ready():
-        yield "Please download the dataset first (step 1)."
+        yield "Please download the dataset first (step 1).", gr.update()
         return
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -67,9 +76,14 @@ def train_model(num_epochs, batch_size, lr, weight_decay):
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
+    # every run gets saved into the models folder with its own timestamp
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    run_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+
     best_acc = 0.0
+    best_path = None
     log = [f"Device : {device}", "Training started...\n"]
-    yield "\n".join(log)
+    yield "\n".join(log), gr.update()
 
     for epoch in range(1, int(num_epochs) + 1):
         # train for one epoch
@@ -102,22 +116,31 @@ def train_model(num_epochs, batch_size, lr, weight_decay):
 
         line = f"Epoch {epoch:2d}/{int(num_epochs)}  loss {train_loss:.4f}  train {train_acc:.1f}%  val {val_acc:.1f}%"
 
-        # save the model whenever it gets better
+        # keep the best epoch of this run, named with epoch / accuracy / date
         if val_acc > best_acc:
             best_acc = val_acc
-            torch.save(model.state_dict(), MODEL_PATH)
+            new_path = os.path.join(MODELS_DIR, f"model_ep{epoch}_acc{val_acc:.2f}_{run_time}.pth")
+            torch.save(model.state_dict(), new_path)
+            if best_path and os.path.exists(best_path):
+                os.remove(best_path)
+            best_path = new_path
             line += "  saved"
 
         log.append(line)
-        yield "\n".join(log)
+        yield "\n".join(log), gr.update()
 
-    log.append(f"\nDone!")
-    yield "\n".join(log)
+    log.append(f"\nDone! Saved as {os.path.basename(best_path)}" if best_path else "\nDone!")
+    # refresh the model picker and select the one we just trained
+    selected = os.path.basename(best_path) if best_path else None
+    yield "\n".join(log), gr.update(choices=list_models(), value=selected)
 
 
-def evaluate_model():
-    if not os.path.exists(MODEL_PATH):
-        return "No trained model found. Train it first (step 2).", None
+def evaluate_model(model_name):
+    if not model_name:
+        return "Select a model first (or train one in step 2).", None
+    model_path = os.path.join(MODELS_DIR, model_name)
+    if not os.path.exists(model_path):
+        return "That model file no longer exists. Refresh the list.", None
     if not dataset_ready():
         return "Dataset not found. Download it first (step 1).", None
 
@@ -127,7 +150,7 @@ def evaluate_model():
     test_loader = DataLoader(test_ds, batch_size=256, shuffle=False, num_workers=0)
 
     model = DigitClassifier()
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
     model.eval()
 
@@ -217,16 +240,19 @@ def canvas_to_mnist(img):
     return out
 
 
-def predict_drawing(drawing):
-    if not os.path.exists(MODEL_PATH):
-        return "No trained model found. Train it first (step 2).", None
+def predict_drawing(drawing, model_name):
+    if not model_name:
+        return "Select a model first (step 3).", None
+    model_path = os.path.join(MODELS_DIR, model_name)
+    if not os.path.exists(model_path):
+        return "That model file no longer exists. Refresh the list.", None
 
     if drawing is None:
         return "", None
 
     img = drawing.get("composite") if isinstance(drawing, dict) else drawing
     if img is None:
-        return "D", None
+        return "", None
 
     img = canvas_to_mnist(img)
     if img is None:
@@ -237,7 +263,7 @@ def predict_drawing(drawing):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = DigitClassifier()
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device).eval()
 
     with torch.no_grad():
@@ -273,7 +299,6 @@ with gr.Blocks(title="Digit Classifier") as demo:
     gr.Markdown("## Step 1: Download the dataset")
     dl_btn = gr.Button("Download MNIST", variant="primary")
     dl_status = gr.Textbox(label="Status", lines=4, interactive=False)
-    dl_btn.click(fn=download_dataset, outputs=dl_status)
 
     # train
     gr.Markdown("## Step 2: Train the model")
@@ -285,14 +310,12 @@ with gr.Blocks(title="Digit Classifier") as demo:
         weight_decay = gr.Number(value=1e-4, label="Weight decay (L2)")
     train_btn = gr.Button("Start training", variant="primary")
     log_box = gr.Textbox(label="Training log", lines=14, interactive=False)
-    train_btn.click(
-        fn=train_model,
-        inputs=[epochs, batch_size, lr, weight_decay],
-        outputs=log_box
-    )
 
     # evaluate
     gr.Markdown("## Step 3: Evaluate the model")
+    with gr.Row():
+        model_dropdown = gr.Dropdown(choices=list_models(), label="Trained model", scale=4)
+        refresh_btn = gr.Button("Refresh list", scale=1)
 
     gr.Markdown("### Run it on a test set")
     gr.Markdown("Checks the model on the 10,000 test images it never saw during training.")
@@ -300,7 +323,6 @@ with gr.Blocks(title="Digit Classifier") as demo:
     with gr.Row():
         eval_report = gr.Textbox(label="Accuracy report", lines=14, interactive=False)
         conf_matrix = gr.Plot(label="Confusion matrix")
-    eval_btn.click(fn=evaluate_model, outputs=[eval_report, conf_matrix])
 
     gr.Markdown("### Draw your own digit")
     gr.Markdown("Draw any digit (0–9) on the canvas for the model to predict.")
@@ -318,7 +340,17 @@ with gr.Blocks(title="Digit Classifier") as demo:
         with gr.Column(scale=1):
             pred_label = gr.Markdown("")
             pred_chart = gr.Plot(label="Confidence per digit")
-    canvas.change(fn=predict_drawing, inputs=canvas, outputs=[pred_label, pred_chart])
+
+    # wiring (done here so training can refresh the model dropdown defined above)
+    dl_btn.click(fn=download_dataset, outputs=dl_status)
+    train_btn.click(
+        fn=train_model,
+        inputs=[epochs, batch_size, lr, weight_decay],
+        outputs=[log_box, model_dropdown]
+    )
+    refresh_btn.click(fn=lambda: gr.update(choices=list_models()), outputs=model_dropdown)
+    eval_btn.click(fn=evaluate_model, inputs=model_dropdown, outputs=[eval_report, conf_matrix])
+    canvas.change(fn=predict_drawing, inputs=[canvas, model_dropdown], outputs=[pred_label, pred_chart])
 
 
 if __name__ == "__main__":
